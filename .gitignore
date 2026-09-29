@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build output
+dist/
+out/
+build/
+
+# Environment & secrets — NEVER COMMIT
+.env
+.env.*
+!env.example
+
+# Python
+python/.agent_state.json
+python/__pycache__/
+python/*.pyc
+*.egg-info/
+.venv/
+venv/
+
+# Circle recovery files
+.circle/
+recovery_file*.dat
+*-recovery-file.json
+
+# Foundry / contracts build artifacts
+contracts/out/
+contracts/cache/
+
+# Logs
+*.log
+/tmp/
+
+# OS
+.DS_Store
+Thumbs.db
