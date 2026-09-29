@@ -1,0 +1,2 @@
+export PATH="$HOME/.local/bin:$PATH"
+echo "github_pat_YOUR_TOKEN_HERE" | gh auth login --with-token
