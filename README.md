@@ -1,336 +1,196 @@
-"""
-agent_transfer.py — Agent-to-Agent USDC Transfer (Python CLI)
+# Agent-to-Agent USDC Transfer
 
-Mirrors the TypeScript backend in a single runnable script.
-Uses the Circle Developer-Controlled Wallets REST API directly
-(no Python SDK needed — just httpx + standard library).
+A full-stack demo of **programmatic USDC transfers between AI agents** on [Arc Testnet](https://arc.io) using Circle developer-controlled wallets.
 
-Usage:
-    pip install httpx python-dotenv
-    cp .env.example .env        # fill in your keys
-    python agent_transfer.py provision           # create Agent Alpha + Beta
-    python agent_transfer.py balances            # show live USDC balances
-    python agent_transfer.py transfer 0.10       # send $0.10 USDC Alpha → Beta
-    python agent_transfer.py history             # print transfer history
-    python agent_transfer.py status <tx_id>      # check one transaction
-"""
+Two wallets (Agent Alpha and Agent Beta) are provisioned via the Circle SDK. A dashboard lets you fire transfers, watch real-time transaction state, and inspect the history — all onchain on Arc, where USDC is the native gas token.
 
-import json
-import os
-import sys
-import time
-import uuid
-from pathlib import Path
-from typing import Optional
+---
 
-try:
-    import httpx
-    from dotenv import load_dotenv
-except ImportError:
-    sys.exit(
-        "Missing dependencies. Run:  pip install httpx python-dotenv"
-    )
+## Features
 
-# ─── configuration ────────────────────────────────────────────────────────────
+- **Two agent wallets** provisioned in one click via Circle developer-controlled wallets SDK
+- **Live USDC balances** polled from the Circle API
+- **Programmatic transfers** with real-time state transitions (INITIATED → SENT → COMPLETE)
+- **Arc Testnet explorer** links for every confirmed transaction
+- **Python CLI** companion (`python/agent_transfer.py`) — run the same flow without a browser
+- **Solidity contracts** (DisputeResolver) for USDC escrow-based dispute resolution
 
-load_dotenv()
+---
 
-API_KEY = os.getenv("CIRCLE_DEVELOPER_CONTROLLED_API_KEY") or os.getenv("CIRCLE_API_KEY") or ""
-ENTITY_SECRET = os.getenv("CIRCLE_ENTITY_SECRET") or os.getenv("ENTITY_SECRET") or ""
-BASE_URL = "https://api.circle.com/v1/w3s"
-BLOCKCHAIN = "ARC-TESTNET"
-ARC_USDC = "0x3600000000000000000000000000000000000000"
-ARC_EXPLORER = "https://explorer.testnet.arc.io/tx"
+## Tech Stack
 
-# Local state file so wallet IDs persist across runs
-STATE_FILE = Path(__file__).parent / ".agent_state.json"
-TERMINAL_STATES = {"COMPLETE", "FAILED", "DENIED", "CANCELLED"}
+| Layer | Technology |
+|---|---|
+| Frontend | React 18, Vite, TypeScript, Tailwind CSS, Framer Motion |
+| Backend | Bun + Node HTTP server (TypeScript) |
+| Onchain | wagmi v2, viem v2, ConnectKit |
+| Wallets | Circle Developer-Controlled Wallets SDK |
+| Contracts | Solidity 0.8.28, Foundry, OpenZeppelin 5.1.0 |
+| Chain | Arc Testnet (Chain ID: 5042002) |
+| Token | USDC (Arc Testnet: `0x3600000000000000000000000000000000000000`) |
+| Python CLI | Python 3.11+, httpx, python-dotenv |
 
+---
 
-# ─── helpers ──────────────────────────────────────────────────────────────────
+## Project Structure
 
-def _headers() -> dict:
-    if not API_KEY:
-        sys.exit("ERROR: Set CIRCLE_DEVELOPER_CONTROLLED_API_KEY in your .env file.")
-    return {
-        "Authorization": f"Bearer {API_KEY}",
-        "Content-Type": "application/json",
-    }
+```
+.
+├── src/                          # React frontend
+│   ├── App.tsx                   # App root
+│   ├── components/
+│   │   ├── AgentTransferDashboard.tsx   # Main dashboard
+│   │   └── DisputeDashboard.tsx         # Dispute resolver UI
+│   ├── onchain-facts.ts          # Chain/USDC addresses (generated)
+│   ├── onchain-money.ts          # USDC amount helpers
+│   └── onchain-wait.ts           # Transaction state polling
+├── server.ts                     # Bun backend — Circle SDK API routes
+├── contracts/
+│   ├── DisputeResolver.sol       # USDC escrow dispute contract
+│   └── test/                     # Foundry tests
+├── python/
+│   ├── agent_transfer.py         # Python CLI companion
+│   ├── requirements.txt
+│   └── README.md
+├── .github/
+│   ├── workflows/ci.yml          # Type-check + lint on push/PR
+│   └── ISSUE_TEMPLATE/           # Bug report + feature request templates
+├── foundry.toml
+└── package.json
+```
 
+---
 
-def _client() -> httpx.Client:
-    return httpx.Client(base_url=BASE_URL, headers=_headers(), timeout=30)
+## Quick Start
 
+### Prerequisites
 
-def _load_state() -> dict:
-    if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text())
-    return {"walletSetId": None, "agents": [], "history": []}
+- [Bun](https://bun.sh) v1.0+
+- [Foundry](https://getfoundry.sh) (for contract work)
+- A [Circle developer account](https://console.circle.com) with an API key + entity secret
 
+### 1. Install dependencies
 
-def _save_state(state: dict) -> None:
-    STATE_FILE.write_text(json.dumps(state, indent=2))
+```bash
+bun install
+```
 
+### 2. Configure environment
 
-def _idempotency_key() -> str:
-    return str(uuid.uuid4())
+```bash
+cp env.example .env
+```
 
+Edit `.env`:
 
-def _print_agent(agent: dict, balance: Optional[str] = None) -> None:
-    role = "Sender" if agent["role"] == "sender" else "Receiver"
-    bal = f"  USDC: ${balance}" if balance else ""
-    print(f"  [{role}] {agent['name']}")
-    print(f"          id:      {agent['id']}")
-    print(f"          address: {agent['address']}{bal}")
+```
+CIRCLE_DEVELOPER_CONTROLLED_API_KEY=your_api_key_here
+CIRCLE_ENTITY_SECRET=your_entity_secret_here
+```
 
+### 3. Run the app
 
-# ─── API wrappers ─────────────────────────────────────────────────────────────
+```bash
+# Terminal 1 — backend
+bun server.ts
 
-def create_wallet_set(client: httpx.Client) -> str:
-    """Create a wallet set and return its ID."""
-    resp = client.post("/developer/walletSets", json={"name": "Agent-to-Agent Set"})
-    resp.raise_for_status()
-    ws_id = resp.json()["data"]["walletSet"]["id"]
-    print(f"  Wallet set created: {ws_id}")
-    return ws_id
+# Terminal 2 — frontend
+bun run dev
+```
 
+Open `http://localhost:5173` and click **Provision Agents**.
 
-def create_wallets(client: httpx.Client, wallet_set_id: str) -> list[dict]:
-    """Create 2 SCA wallets on Arc Testnet."""
-    resp = client.post(
-        "/developer/wallets",
-        json={
-            "idempotencyKey": _idempotency_key(),
-            "accountType": "SCA",
-            "blockchains": [BLOCKCHAIN],
-            "count": 2,
-            "walletSetId": wallet_set_id,
-        },
-    )
-    resp.raise_for_status()
-    return resp.json()["data"]["wallets"]
+### 4. Fund Agent Alpha
 
+Use the testnet faucet to send USDC to Agent Alpha's address, then fire your first transfer from the dashboard.
 
-def get_usdc_balance(client: httpx.Client, wallet_id: str) -> str:
-    """Return USDC balance string for a wallet (e.g. '1.50')."""
-    resp = client.get(f"/wallets/{wallet_id}/balances")
-    resp.raise_for_status()
-    balances = resp.json()["data"].get("tokenBalances", [])
-    for tb in balances:
-        if tb.get("token", {}).get("symbol") == "USDC":
-            return tb.get("amount", "0")
-    return "0"
+---
 
+## Python CLI
 
-def create_transfer(
-    client: httpx.Client,
-    from_wallet_id: str,
-    to_address: str,
-    amount: str,
-) -> str:
-    """Initiate a USDC transfer and return the transaction ID."""
-    resp = client.post(
-        "/developer/transactions/transfer",
-        json={
-            "idempotencyKey": _idempotency_key(),
-            "walletId": from_wallet_id,
-            "tokenAddress": ARC_USDC,
-            "destinationAddress": to_address,
-            "amounts": [amount],
-            "fee": {"type": "level", "config": {"feeLevel": "MEDIUM"}},
-        },
-    )
-    resp.raise_for_status()
-    tx_id = resp.json()["data"]["id"]
-    return tx_id
+A standalone Python script that mirrors the full transfer flow without the browser UI.
 
+```bash
+cd python/
+pip install -r requirements.txt
+cp ../env.example .env   # or copy your .env here
 
-def get_transaction(client: httpx.Client, tx_id: str) -> dict:
-    """Fetch transaction state from Circle."""
-    resp = client.get(f"/transactions/{tx_id}")
-    resp.raise_for_status()
-    return resp.json()["data"]["transaction"]
+# Provision wallets
+python agent_transfer.py provision
 
+# Check balances
+python agent_transfer.py balances
 
-def poll_until_terminal(client: httpx.Client, tx_id: str, interval: int = 3) -> dict:
-    """Poll getTransaction every `interval` seconds until a terminal state."""
-    print(f"  Polling transaction {tx_id} …")
-    while True:
-        tx = get_transaction(client, tx_id)
-        state = tx.get("state", "UNKNOWN")
-        print(f"    state: {state}")
-        if state in TERMINAL_STATES:
-            return tx
-        time.sleep(interval)
+# Send $0.10 USDC
+python agent_transfer.py transfer 0.10
 
+# View history
+python agent_transfer.py history
 
-# ─── commands ─────────────────────────────────────────────────────────────────
+# Check a transaction
+python agent_transfer.py status <transaction-id>
+```
 
-def cmd_provision() -> None:
-    """Create Agent Alpha (sender) and Agent Beta (receiver)."""
-    state = _load_state()
-    if len(state.get("agents", [])) >= 2:
-        print("Agents already provisioned:")
-        for a in state["agents"]:
-            _print_agent(a)
-        return
+See [`python/README.md`](python/README.md) for full details.
 
-    if not ENTITY_SECRET:
-        sys.exit(
-            "ERROR: CIRCLE_ENTITY_SECRET is required to provision wallets.\n"
-            "Set it in your .env file."
-        )
+---
 
-    print("Provisioning agent wallets on Arc Testnet …")
-    with _client() as c:
-        ws_id = create_wallet_set(c)
-        wallets = create_wallets(c, ws_id)
+## Smart Contracts
 
-    if len(wallets) < 2:
-        sys.exit("ERROR: Expected 2 wallets; Circle returned fewer.")
+### DisputeResolver
 
-    state["walletSetId"] = ws_id
-    state["agents"] = [
-        {"id": wallets[0]["id"], "address": wallets[0]["address"], "name": "Agent Alpha", "role": "sender"},
-        {"id": wallets[1]["id"], "address": wallets[1]["address"], "name": "Agent Beta", "role": "receiver"},
-    ]
-    _save_state(state)
+An AI-powered USDC escrow dispute resolution contract deployed on Arc Testnet.
 
-    print("\nAgents created:")
-    for a in state["agents"]:
-        _print_agent(a)
-    print(
-        "\nNext: fund Agent Alpha with testnet USDC via https://faucet.circle.com, "
-        "then run:  python agent_transfer.py transfer 0.10"
-    )
+| Feature | Detail |
+|---|---|
+| Deployed address | See `AGENTS.md` |
+| Stake model | Both parties stake equal USDC; winner takes the pot |
+| Verdict | AI oracle submits verdict onchain; owner can override |
+| Payouts | Pull-payment via `claimPayout(disputeId)` — O(1), blocklist-safe |
+| Timeouts | 7-day join window; 14-day verdict window; refundable on expiry |
 
+```bash
+# Build
+bun run contracts:build
 
-def cmd_balances() -> None:
-    """Show live USDC balances for both agents."""
-    state = _load_state()
-    agents = state.get("agents", [])
-    if not agents:
-        sys.exit("No agents provisioned yet. Run:  python agent_transfer.py provision")
+# Test
+bun run contracts:test
+```
 
-    print("Live USDC balances on Arc Testnet:")
-    with _client() as c:
-        for a in agents:
-            bal = get_usdc_balance(c, a["id"])
-            _print_agent(a, bal)
+---
 
+## API Routes
 
-def cmd_transfer(amount: str) -> None:
-    """Send USDC from Agent Alpha to Agent Beta."""
-    try:
-        amt_f = float(amount)
-        if amt_f <= 0:
-            raise ValueError
-    except ValueError:
-        sys.exit(f"Invalid amount: {amount!r}. Provide a positive number, e.g. 0.10")
+The backend (`server.ts`) exposes these routes (proxied through Vite at `/api/*`):
 
-    state = _load_state()
-    agents = state.get("agents", [])
-    if len(agents) < 2:
-        sys.exit("Agents not provisioned. Run:  python agent_transfer.py provision")
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/agents/provision` | Create wallet set + 2 SCA wallets |
+| `GET` | `/api/agents` | List agents with live USDC balances |
+| `POST` | `/api/transfer` | Initiate USDC transfer |
+| `GET` | `/api/tx/:id` | Poll transaction state |
+| `GET` | `/api/history` | In-memory transfer history |
 
-    sender = next((a for a in agents if a["role"] == "sender"), None)
-    receiver = next((a for a in agents if a["role"] == "receiver"), None)
-    if not sender or not receiver:
-        sys.exit("Unexpected agent configuration in state file.")
+---
 
-    print(f"Sending ${amount} USDC: {sender['name']} → {receiver['name']}")
-    with _client() as c:
-        tx_id = create_transfer(c, sender["id"], receiver["address"], amount)
-        print(f"  Transaction ID: {tx_id}")
-        tx = poll_until_terminal(c, tx_id)
+## Environment Variables
 
-    state.setdefault("history", []).insert(
-        0,
-        {
-            "id": tx_id,
-            "fromAgent": sender["name"],
-            "toAgent": receiver["name"],
-            "amount": amount,
-            "state": tx.get("state"),
-            "txHash": tx.get("txHash"),
-        },
-    )
-    _save_state(state)
+| Variable | Required | Description |
+|---|---|---|
+| `CIRCLE_DEVELOPER_CONTROLLED_API_KEY` | Yes | Circle API key (`PREFIX:ID:SECRET`) |
+| `CIRCLE_ENTITY_SECRET` | Yes | 32-byte hex entity secret |
 
-    final_state = tx.get("state")
-    tx_hash = tx.get("txHash")
-    if final_state == "COMPLETE":
-        print(f"\n  Transfer COMPLETE!")
-        if tx_hash:
-            print(f"  Explorer: {ARC_EXPLORER}/{tx_hash}")
-    else:
-        print(f"\n  Transfer ended with state: {final_state}")
-        if tx.get("errorReason"):
-            print(f"  Reason: {tx['errorReason']}")
+> **Security:** Never commit `.env`. The `.gitignore` already excludes it.  
+> Entity secrets are one-time registered per Circle entity — store the recovery file securely.
 
+---
 
-def cmd_status(tx_id: str) -> None:
-    """Check the current state of a transaction."""
-    with _client() as c:
-        tx = get_transaction(c, tx_id)
-    state = tx.get("state", "UNKNOWN")
-    tx_hash = tx.get("txHash")
-    print(f"Transaction {tx_id}")
-    print(f"  State:   {state}")
-    if tx_hash:
-        print(f"  Explorer: {ARC_EXPLORER}/{tx_hash}")
-    if tx.get("errorReason"):
-        print(f"  Error:   {tx['errorReason']}")
+## Contributing
 
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-def cmd_history() -> None:
-    """Print local transfer history."""
-    state = _load_state()
-    history = state.get("history", [])
-    if not history:
-        print("No transfers recorded yet.")
-        return
-    print(f"Transfer history ({len(history)} records):")
-    for rec in history:
-        tx_hash = rec.get("txHash", "")
-        explorer = f" → {ARC_EXPLORER}/{tx_hash}" if tx_hash else ""
-        print(
-            f"  [{rec.get('state', '?'):10}] "
-            f"{rec.get('fromAgent')} → {rec.get('toAgent')}  "
-            f"${rec.get('amount')} USDC{explorer}"
-        )
+---
 
+## License
 
-# ─── entry point ──────────────────────────────────────────────────────────────
-
-COMMANDS = {
-    "provision": (cmd_provision, 0),
-    "balances":  (cmd_balances,  0),
-    "transfer":  (cmd_transfer,  1),   # amount
-    "status":    (cmd_status,    1),   # tx_id
-    "history":   (cmd_history,   0),
-}
-
-USAGE = """\
-Usage:
-  python agent_transfer.py provision           create Agent Alpha + Beta
-  python agent_transfer.py balances            show live USDC balances
-  python agent_transfer.py transfer <amount>   send USDC Alpha → Beta
-  python agent_transfer.py status <tx_id>      check one transaction
-  python agent_transfer.py history             print transfer history
-"""
-
-if __name__ == "__main__":
-    args = sys.argv[1:]
-    if not args or args[0] not in COMMANDS:
-        print(USAGE)
-        sys.exit(0)
-
-    cmd_name = args[0]
-    fn, nargs = COMMANDS[cmd_name]
-    if len(args) - 1 < nargs:
-        print(f"ERROR: '{cmd_name}' requires {nargs} argument(s).\n")
-        print(USAGE)
-        sys.exit(1)
-
-    fn(*args[1 : 1 + nargs])
+MIT — see [LICENSE](LICENSE).
